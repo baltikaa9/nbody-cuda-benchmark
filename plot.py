@@ -1,69 +1,75 @@
 import pandas as pd
 import matplotlib.pyplot as plt
+import seaborn as sns
 
-# Загружаем данные
+# Чистый стиль без лишних украшательств
+sns.set_theme(style="whitegrid")
+plt.rcParams.update({
+    'font.size': 10, 
+    'axes.titlesize': 12,
+    'figure.facecolor': 'white',  # Чисто белый фон окна
+    'axes.facecolor': 'white'    # Чисто белый фон графиков
+})
+
 try:
     df = pd.read_csv("benchmark_results.csv")
 except FileNotFoundError:
-    print("Файл benchmark_results.csv не найден! Сначала запустите CUDA-программу.")
+    print("Ошибка: Файл benchmark_results.csv не найден.")
     exit(1)
 
-# Определяем типы векторов и метрики
-types = ['float3', 'float4', 'double3', 'double4']
-metrics = [
-    ('ms_per_pair', 'Время на пару (ms) [Меньше = Лучше]', False), 
-    ('gints', 'Производительность (GInt/s) [Больше = Лучше]', True)
-]
+v_types = ['float3', 'float4', 'double3', 'double4']
+n_vals = sorted(df['N'].unique())
 
-# Создаем сетку графиков 2х5 (2 строки = 2 метрики, 5 колонок = 4 типа + 1 сравнение)
-fig, axes = plt.subplots(2, 5, figsize=(28, 12))
-fig.suptitle('Детальный анализ производительности N-Body', fontsize=18, fontweight='bold')
+# Используем layout='constrained' для автоматических отступов
+fig = plt.figure(figsize=(20, 11), layout='constrained')
+gs = fig.add_gridspec(3, 4)
 
-for m_idx, (metric, ylabel, is_higher_better) in enumerate(metrics):
+def plot_type_metric(ax, vtype, metric, title, ylabel):
+    df_type = df[df['type'] == vtype]
+    sns.lineplot(data=df_type, x='N', y=metric, hue='BS', 
+                 marker='o', palette='tab10', ax=ax)
+    ax.set_title(f"{vtype}: {title}", fontweight='bold')
+    ax.set_xscale('log', base=2)
+    ax.set_xticks(n_vals)
+    ax.set_xticklabels([str(n) for n in n_vals])
+    ax.set_ylabel(ylabel)
+    ax.set_xlabel("N")
+    ax.legend(title='BS', fontsize='8', loc='best')
+
+# СТРОКА 1: Задержка
+for i, vt in enumerate(v_types):
+    ax = fig.add_subplot(gs[0, i])
+    plot_type_metric(ax, vt, 'ms_per_pair', 'Задержка', 'мс/пара')
+
+# СТРОКА 2: Производительность
+for i, vt in enumerate(v_types):
+    ax = fig.add_subplot(gs[1, i])
+    plot_type_metric(ax, vt, 'gints', 'Производительность', 'GInt/s')
+
+# СТРОКА 3: СРАВНЕНИЯ
+ax_comp_ms = fig.add_subplot(gs[2, 0:2])
+ax_comp_gi = fig.add_subplot(gs[2, 2:4])
+
+for vt in v_types:
+    df_vt = df[df['type'] == vt]
+    best_ms = df_vt.loc[df_vt.groupby('N')['ms_per_pair'].idxmin()].sort_values('N')
+    best_gi = df_vt.loc[df_vt.groupby('N')['gints'].idxmax()].sort_values('N')
     
-    # Графики 1-4: Зависимость метрики от N для каждого BS по типам векторов
-    for t_idx, vtype in enumerate(types):
-        ax = axes[m_idx, t_idx]
-        df_type = df[df['type'] == vtype]
-        
-        # Строим линию для каждого размера блока (BS)
-        for bs in sorted(df['BS'].unique()):
-            df_bs = df_type[df_type['BS'] == bs].sort_values(by='N')
-            if not df_bs.empty:
-                ax.plot(df_bs['N'], df_bs[metric], marker='o', markersize=5, label=f'BS={bs}')
-        
-        ax.set_title(f"{vtype}\n{metric}")
-        ax.set_xlabel("Число тел (N)")
-        ax.set_ylabel(ylabel)
-        ax.set_xscale('log', base=2)
-        ax.set_xticks(sorted(df['N'].unique()))
-        ax.set_xticklabels([str(n) for n in sorted(df['N'].unique())], rotation=45)
-        ax.grid(True, linestyle='--', alpha=0.6)
-        ax.legend(fontsize=8)
+    ax_comp_ms.plot(best_ms['N'], best_ms['ms_per_pair'], '-s', label=vt, linewidth=2)
+    ax_comp_gi.plot(best_gi['N'], best_gi['gints'], '-o', label=vt, linewidth=2)
 
-    # График 5: Итоговое сравнение типов (берем ЛУЧШИЙ результат среди всех BS для каждого N)
-    ax_comp = axes[m_idx, 4]
-    for vtype in types:
-        df_type = df[df['type'] == vtype]
-        
-        # Выбираем лучший BS для каждого N
-        if is_higher_better:
-            best_df = df_type.loc[df_type.groupby('N')[metric].idxmax()].sort_values(by='N')
-        else:
-            best_df = df_type.loc[df_type.groupby('N')[metric].idxmin()].sort_values(by='N')
-        
-        ax_comp.plot(best_df['N'], best_df[metric], marker='s', linewidth=2, markersize=7, label=vtype)
-        
-    ax_comp.set_title(f"СРАВНЕНИЕ ТИПОВ\n(Лучшие BS) - {metric}")
-    ax_comp.set_xlabel("Число тел (N)")
-    ax_comp.set_ylabel(ylabel)
-    ax_comp.set_xscale('log', base=2)
-    ax_comp.set_xticks(sorted(df['N'].unique()))
-    ax_comp.set_xticklabels([str(n) for n in sorted(df['N'].unique())], rotation=45)
-    ax_comp.grid(True, linestyle='-', alpha=0.8)
-    ax_comp.legend(fontsize=10, title="Vector Type")
+ax_comp_ms.set_title('СРАВНЕНИЕ ЗАДЕРЖКИ (Best BS)', fontweight='bold')
+ax_comp_gi.set_title('СРАВНЕНИЕ ПРОИЗВОДИТЕЛЬНОСТИ (Best BS)', fontweight='bold')
 
-plt.tight_layout(rect=[0, 0, 1, 0.96]) # Оставляем место для главного заголовка
-plt.savefig("benchmark_10_plots.png", dpi=300, bbox_inches='tight')
-print("Все 10 графиков успешно сохранены в файл benchmark_10_plots.png")
+for ax in [ax_comp_ms, ax_comp_gi]:
+    ax.set_xscale('log', base=2)
+    ax.set_xticks(n_vals)
+    ax.set_xticklabels([str(n) for n in n_vals])
+    ax.legend(title='Тип')
+    ax.set_xlabel("N")
+
+fig.suptitle('Отчет производительности CUDA N-Body', fontsize=18, fontweight='bold')
+
+plt.savefig("plot.png", dpi=150)
+print("Чистый график сохранен в plot.png")
 plt.show()
