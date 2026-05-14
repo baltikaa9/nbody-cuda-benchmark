@@ -1,75 +1,124 @@
-import pandas as pd
 import matplotlib.pyplot as plt
+import pandas as pd
 import seaborn as sns
 
-# Чистый стиль без лишних украшательств
 sns.set_theme(style="whitegrid")
-plt.rcParams.update({
-    'font.size': 10, 
-    'axes.titlesize': 12,
-    'figure.facecolor': 'white',  # Чисто белый фон окна
-    'axes.facecolor': 'white'    # Чисто белый фон графиков
-})
+plt.rcParams.update(
+    {
+        "font.size": 10,
+        "axes.titlesize": 12,
+        "figure.facecolor": "white",
+        "axes.facecolor": "white",
+    }
+)
 
 try:
-    df = pd.read_csv("benchmark_results.csv")
+    df = pd.read_csv("benchmark_results.csv", comment="#")
 except FileNotFoundError:
     print("Ошибка: Файл benchmark_results.csv не найден.")
     exit(1)
 
-v_types = ['float3', 'float4', 'double3', 'double4']
-n_vals = sorted(df['N'].unique())
+v_types = ["float3", "float4", "double3", "double4"]
+n_vals = sorted(df["N"].unique())
+bs_vals = sorted(df["BS"].unique())
+colors = plt.cm.tab10
 
-# Используем layout='constrained' для автоматических отступов
-fig = plt.figure(figsize=(20, 11), layout='constrained')
-gs = fig.add_gridspec(3, 4)
 
-def plot_type_metric(ax, vtype, metric, title, ylabel):
-    df_type = df[df['type'] == vtype]
-    sns.lineplot(data=df_type, x='N', y=metric, hue='BS', 
-                 marker='o', palette='tab10', ax=ax)
-    ax.set_title(f"{vtype}: {title}", fontweight='bold')
-    ax.set_xscale('log', base=2)
+def plot_type(ax, vtype, metric, ylabel):
+    """Все BS для одного типа: global — сплошная, shared — пунктир"""
+    for i, bs in enumerate(bs_vals):
+        for variant, style in [("global", "-"), ("shared", "--")]:
+            sub = df[
+                (df["type"] == vtype) & (df["variant"] == variant) & (df["BS"] == bs)
+            ]
+            if not sub.empty:
+                ax.plot(
+                    sub["N"],
+                    sub[metric],
+                    linestyle=style,
+                    color=colors(i),
+                    marker=".",
+                    label=f"BS={bs} ({variant})",
+                    linewidth=1.2,
+                )
+    ax.set_title(vtype, fontweight="bold")
+    ax.set_xscale("log", base=2)
     ax.set_xticks(n_vals)
-    ax.set_xticklabels([str(n) for n in n_vals])
+    ax.set_xticklabels([str(n) for n in n_vals], fontsize=8)
     ax.set_ylabel(ylabel)
     ax.set_xlabel("N")
-    ax.legend(title='BS', fontsize='8', loc='best')
 
-# СТРОКА 1: Задержка
+
+# ─── Фигура 1: ms_per_pair ───
+fig1, axes1 = plt.subplots(2, 2, figsize=(14, 10), layout="constrained")
 for i, vt in enumerate(v_types):
-    ax = fig.add_subplot(gs[0, i])
-    plot_type_metric(ax, vt, 'ms_per_pair', 'Задержка', 'мс/пара')
+    plot_type(axes1[i // 2][i % 2], vt, "ms_per_pair", "мс/пара")
+handles, labels = axes1[0][0].get_legend_handles_labels()
+fig1.legend(
+    handles,
+    labels,
+    loc="outside lower center",
+    ncol=6,
+    fontsize=8,
+    title="BS (variant)",
+)
+fig1.suptitle("Задержка (ms/pair) — все BS", fontsize=14, fontweight="bold")
+plt.savefig("plot_latency.png", dpi=150)
+print("plot_latency.png")
 
-# СТРОКА 2: Производительность
+# ─── Фигура 2: gints ───
+fig2, axes2 = plt.subplots(2, 2, figsize=(14, 10), layout="constrained")
 for i, vt in enumerate(v_types):
-    ax = fig.add_subplot(gs[1, i])
-    plot_type_metric(ax, vt, 'gints', 'Производительность', 'GInt/s')
+    plot_type(axes2[i // 2][i % 2], vt, "gints", "GInt/s")
+handles, labels = axes2[0][0].get_legend_handles_labels()
+fig2.legend(
+    handles,
+    labels,
+    loc="outside lower center",
+    ncol=6,
+    fontsize=8,
+    title="BS (variant)",
+)
+fig2.suptitle("Производительность (GInt/s) — все BS", fontsize=14, fontweight="bold")
+plt.savefig("plot_throughput.png", dpi=150)
+print("plot_throughput.png")
 
-# СТРОКА 3: СРАВНЕНИЯ
-ax_comp_ms = fig.add_subplot(gs[2, 0:2])
-ax_comp_gi = fig.add_subplot(gs[2, 2:4])
+# ─── Фигура 3: Сравнение типов (лучший BS) ───
+best = df.loc[df.groupby(["type", "N", "variant"])["gints"].idxmax()].sort_values("N")
 
+fig3, axes3 = plt.subplots(1, 2, figsize=(14, 5), layout="constrained")
 for vt in v_types:
-    df_vt = df[df['type'] == vt]
-    best_ms = df_vt.loc[df_vt.groupby('N')['ms_per_pair'].idxmin()].sort_values('N')
-    best_gi = df_vt.loc[df_vt.groupby('N')['gints'].idxmax()].sort_values('N')
-    
-    ax_comp_ms.plot(best_ms['N'], best_ms['ms_per_pair'], '-s', label=vt, linewidth=2)
-    ax_comp_gi.plot(best_gi['N'], best_gi['gints'], '-o', label=vt, linewidth=2)
+    for variant, style, marker in [("global", "-", "s"), ("shared", "--", "o")]:
+        sub = best[(best["type"] == vt) & (best["variant"] == variant)]
+        axes3[0].plot(
+            sub["N"],
+            sub["ms_per_pair"],
+            linestyle=style,
+            marker=marker,
+            label=f"{vt} ({variant})",
+            linewidth=2,
+        )
+        axes3[1].plot(
+            sub["N"],
+            sub["gints"],
+            linestyle=style,
+            marker=marker,
+            label=f"{vt} ({variant})",
+            linewidth=2,
+        )
 
-ax_comp_ms.set_title('СРАВНЕНИЕ ЗАДЕРЖКИ (Best BS)', fontweight='bold')
-ax_comp_gi.set_title('СРАВНЕНИЕ ПРОИЗВОДИТЕЛЬНОСТИ (Best BS)', fontweight='bold')
-
-for ax in [ax_comp_ms, ax_comp_gi]:
-    ax.set_xscale('log', base=2)
+for ax, title, ylabel in [
+    (axes3[0], "Задержка (лучший BS)", "мс/пара"),
+    (axes3[1], "Производительность (лучший BS)", "GInt/s"),
+]:
+    ax.set_title(title, fontweight="bold")
+    ax.set_xscale("log", base=2)
     ax.set_xticks(n_vals)
     ax.set_xticklabels([str(n) for n in n_vals])
-    ax.legend(title='Тип')
+    ax.legend(title="Тип (variant)", fontsize=9)
     ax.set_xlabel("N")
+    ax.set_ylabel(ylabel)
 
-fig.suptitle('Отчет производительности CUDA N-Body', fontsize=18, fontweight='bold')
-
-plt.savefig("plot.png", dpi=150)
-print("Чистый график сохранен в plot.png")
-plt.show()
+fig3.suptitle("CUDA N-Body: Global vs Shared Memory", fontsize=14, fontweight="bold")
+plt.savefig("plot_comparison.png", dpi=150)
+print("plot_comparison.png")

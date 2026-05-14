@@ -1,6 +1,7 @@
 #include <cuda_runtime.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <algorithm>
 
 // ════════════════════════════════════════════════════════════════════
 // Traits: scalar type, EPS, DT, display name — по одному на тип
@@ -34,7 +35,7 @@ template<> __device__ __forceinline__ double3 vec_zero<double3>() { return make_
 template<> __device__ __forceinline__ double4 vec_zero<double4>() { return make_double4(0.0, 0.0, 0.0, 0.0); }
 
 // ════════════════════════════════════════════════════════════════════
-// N-body kernel
+// N-body kernel — наивный (глобальная память)
 // ════════════════════════════════════════════════════════════════════
 template<typename VEC>
 __global__ void integrateBodies(
@@ -43,8 +44,8 @@ __global__ void integrateBodies(
     const VEC* __restrict__ oldPos,
     const VEC* __restrict__ oldVel,
     int N,
-    typename Traits<VEC>::S dt)
-{
+    typename Traits<VEC>::S dt
+) {
     using S = typename Traits<VEC>::S;
     const S EPS2 = Traits<VEC>::EPS * Traits<VEC>::EPS;
 
@@ -75,6 +76,77 @@ __global__ void integrateBodies(
 
     newPos[idx] = pos;
     newVel[idx] = vel;
+}
+
+// ════════════════════════════════════════════════════════════════════
+// N-body kernel — с разделяемой памятью (тайлинг)
+// ════════════════════════════════════════════════════════════════════
+template<typename VEC, int BLOCK_SIZE>
+__global__ void integrateBodiesShared(
+    VEC* __restrict__       newPos,
+    VEC* __restrict__       newVel,
+    const VEC* __restrict__ oldPos,
+    const VEC* __restrict__ oldVel,
+    int N,
+    typename Traits<VEC>::S dt
+) {
+    using S = typename Traits<VEC>::S;
+    const S EPS2 = Traits<VEC>::EPS * Traits<VEC>::EPS;
+
+    __shared__ VEC sharedPos[BLOCK_SIZE];
+
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int numTiles = (N + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
+    VEC pos, vel;
+    VEC f = vec_zero<VEC>();
+
+    if (idx < N) {
+        pos = oldPos[idx];
+    }
+
+    // Проходим по всем тайлам
+    for (int tile = 0; tile < numTiles; tile++) {
+        int tileStart = tile * BLOCK_SIZE;
+        int loadIdx = tileStart + threadIdx.x;
+
+        // Кооперативная загрузка тайла в shared memory
+        // Заполняем нулями, если за пределами N — иначе мусор
+        sharedPos[threadIdx.x] = (loadIdx < N) ? oldPos[loadIdx] : vec_zero<VEC>();
+        __syncthreads();
+
+        int tileEnd = min(tileStart + BLOCK_SIZE, N);
+        int tileSize = tileEnd - tileStart;
+
+        // Вычисляем взаимодействия с телами из текущего тайла
+        if (idx < N) {
+            for (int i = 0; i < tileSize; i++) {
+                VEC pi = sharedPos[i];
+                S dx = pi.x - pos.x;
+                S dy = pi.y - pos.y;
+                S dz = pi.z - pos.z;
+
+                S dist2 = dx*dx + dy*dy + dz*dz + EPS2;
+                S inv   = my_rsqrt(dist2);
+                S s     = inv * inv * inv;
+
+                f.x += dx * s;
+                f.y += dy * s;
+                f.z += dz * s;
+            }
+        }
+
+        __syncthreads();
+    }
+
+    if (idx < N) {
+        vel = oldVel[idx];
+        vel.x += f.x * dt;  vel.y += f.y * dt;  vel.z += f.z * dt;
+        pos.x += vel.x * dt; pos.y += vel.y * dt; pos.z += vel.z * dt;
+
+        newPos[idx] = pos;
+        newVel[idx] = vel;
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -110,7 +182,29 @@ void randomInit(VEC* a, int N) {
 }
 
 // ════════════════════════════════════════════════════════════════════
-// Запуск одного эксперимента
+// Вспомогательная функция для диспетчеризации по размеру блока
+// ════════════════════════════════════════════════════════════════════
+template<typename VEC>
+void launchSharedKernel(int grid, int BS,
+                        VEC* d_pos_out, VEC* d_vel_out,
+                        const VEC* d_pos_in, const VEC* d_vel_in,
+                        int N, typename Traits<VEC>::S dt)
+{
+    switch (BS) {
+        case 32:   integrateBodiesShared<VEC, 32><<<grid, BS>>>(d_pos_out, d_vel_out, d_pos_in, d_vel_in, N, dt); break;
+        case 64:   integrateBodiesShared<VEC, 64><<<grid, BS>>>(d_pos_out, d_vel_out, d_pos_in, d_vel_in, N, dt); break;
+        case 128:  integrateBodiesShared<VEC, 128><<<grid, BS>>>(d_pos_out, d_vel_out, d_pos_in, d_vel_in, N, dt); break;
+        case 256:  integrateBodiesShared<VEC, 256><<<grid, BS>>>(d_pos_out, d_vel_out, d_pos_in, d_vel_in, N, dt); break;
+        case 512:  integrateBodiesShared<VEC, 512><<<grid, BS>>>(d_pos_out, d_vel_out, d_pos_in, d_vel_in, N, dt); break;
+        case 1024: integrateBodiesShared<VEC, 1024><<<grid, BS>>>(d_pos_out, d_vel_out, d_pos_in, d_vel_in, N, dt); break;
+        default:
+            fprintf(stderr, "Unsupported block size: %d\n", BS);
+            exit(EXIT_FAILURE);
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Запуск одного эксперимента (наивный)
 // ════════════════════════════════════════════════════════════════════
 template<typename VEC>
 void runBenchmark(int N, int BS, int iters,
@@ -163,15 +257,86 @@ void runBenchmark(int N, int BS, int iters,
             long long pairs = (long long)N * N;
             double gints = (double)pairs / (avg_ms * 1e-3) / 1e9;
 
-            // Вывод в консоль
             printf("%-8s %7d %5d %12.3f %14.3e %10.3f\n",
                    Traits<VEC>::name(), N, BS, avg_ms,
                    avg_ms / (double)pairs, gints);
-            
-            // Запись в CSV
+
             if (csv_file) {
-                fprintf(csv_file, "%s,%d,%d,%.3f,%.3e,%.3f\n",
+                fprintf(csv_file, "global,%s,%d,%d,%.3f,%.3e,%.3f\n",
                         Traits<VEC>::name(), N, BS, avg_ms, avg_ms / (double)pairs, gints);
+                fflush(csv_file);
+            }
+        }
+    }
+
+    cudaFree(d_pos[0]); cudaFree(d_pos[1]);
+    cudaFree(d_vel[0]); cudaFree(d_vel[1]);
+    free(h_pos); free(h_vel);
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Запуск одного эксперимента (разделяемая память)
+// ════════════════════════════════════════════════════════════════════
+template<typename VEC>
+void runBenchmarkShared(int N, int BS, int iters,
+                        cudaEvent_t evStart, cudaEvent_t evStop, FILE* csv_file)
+{
+    using S = typename Traits<VEC>::S;
+
+    VEC* h_pos = (VEC*)calloc(N, sizeof(VEC));
+    VEC* h_vel = (VEC*)calloc(N, sizeof(VEC));
+    if (!h_pos || !h_vel) { fputs("OOM\n", stderr); exit(1); }
+
+    randomInit<VEC>(h_pos, N);
+    randomInit<VEC>(h_vel, N);
+
+    VEC *d_pos[2], *d_vel[2];
+    CUDA_CHECK(cudaMalloc(&d_pos[0], N * sizeof(VEC)));
+    CUDA_CHECK(cudaMalloc(&d_vel[0], N * sizeof(VEC)));
+    CUDA_CHECK(cudaMalloc(&d_pos[1], N * sizeof(VEC)));
+    CUDA_CHECK(cudaMalloc(&d_vel[1], N * sizeof(VEC)));
+
+    CUDA_CHECK(cudaMemcpy(d_pos[0], h_pos, N*sizeof(VEC), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_vel[0], h_vel, N*sizeof(VEC), cudaMemcpyHostToDevice));
+
+    int grid = (N + BS - 1) / BS;
+
+    // Прогрев
+    launchSharedKernel<VEC>(grid, BS,
+        d_pos[1], d_vel[1], d_pos[0], d_vel[0], N, Traits<VEC>::DT);
+
+    char label[64];
+    snprintf(label, sizeof(label), "shm_%s N=%d BS=%d", Traits<VEC>::name(), N, BS);
+
+    bool ok = kernelOk(label);
+    if (ok) CUDA_CHECK(cudaDeviceSynchronize());
+
+    if (ok) {
+        CUDA_CHECK(cudaEventRecord(evStart));
+        int cur = 0;
+        for (int it = 0; it < iters; it++, cur ^= 1)
+            launchSharedKernel<VEC>(grid, BS,
+                d_pos[cur^1], d_vel[cur^1],
+                d_pos[cur],   d_vel[cur],
+                N, Traits<VEC>::DT);
+        CUDA_CHECK(cudaEventRecord(evStop));
+        CUDA_CHECK(cudaEventSynchronize(evStop));
+
+        if (kernelOk(label)) {
+            float ms;
+            CUDA_CHECK(cudaEventElapsedTime(&ms, evStart, evStop));
+            float avg_ms  = ms / iters;
+            long long pairs = (long long)N * N;
+            double gints = (double)pairs / (avg_ms * 1e-3) / 1e9;
+
+            printf("%-8s %7d %5d %12.3f %14.3e %10.3f\n",
+                   Traits<VEC>::name(), N, BS, avg_ms,
+                   avg_ms / (double)pairs, gints);
+
+            if (csv_file) {
+                fprintf(csv_file, "shared,%s,%d,%d,%.3f,%.3e,%.3f\n",
+                        Traits<VEC>::name(), N, BS, avg_ms, avg_ms / (double)pairs, gints);
+                fflush(csv_file);
             }
         }
     }
@@ -191,14 +356,18 @@ int main() {
            prop.name, prop.major, prop.minor,
            prop.totalGlobalMem >> 20);
 
-    // Открываем файл для записи метрик
+    // Открываем CSV-файл (теперь с колонкой variant)
     FILE* csv_file = fopen("benchmark_results.csv", "w");
     if (csv_file) {
-        fprintf(csv_file, "type,N,BS,avg_ms,ms_per_pair,gints\n");
+        fprintf(csv_file, "variant,type,N,BS,avg_ms,ms_per_pair,gints\n");
     } else {
         fprintf(stderr, "Warning: Could not open benchmark_results.csv for writing\n");
     }
 
+    // ════════════════════════════════════════════════════════════════
+    // Таблица 1: Глобальная память
+    // ════════════════════════════════════════════════════════════════
+    printf("═══ Global memory ═══\n");
     printf("%-8s %7s %5s %12s %14s %10s\n",
            "TYPE", "N", "BS", "avg_ms", "ms/pair", "GInt/s");
     printf("─────────────────────────────────────────────────────────────────\n");
@@ -219,6 +388,26 @@ int main() {
             runBenchmark<float4> (N, BS, iters, evStart, evStop, csv_file);
             runBenchmark<double3>(N, BS, iters, evStart, evStop, csv_file);
             runBenchmark<double4>(N, BS, iters, evStart, evStop, csv_file);
+        }
+        puts("");
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // Таблица 2: Разделяемая память
+    // ════════════════════════════════════════════════════════════════
+    printf("\n═══ Shared memory ═══\n");
+    printf("%-8s %7s %5s %12s %14s %10s\n",
+           "TYPE", "N", "BS", "avg_ms", "ms/pair", "GInt/s");
+    printf("─────────────────────────────────────────────────────────────────\n");
+
+    for (int ni = 0; ni < 5; ni++) {
+        int N = N_list[ni];
+        for (int bi = 0; bi < 6; bi++) {
+            int BS = BS_list[bi];
+            runBenchmarkShared<float3> (N, BS, iters, evStart, evStop, csv_file);
+            runBenchmarkShared<float4> (N, BS, iters, evStart, evStop, csv_file);
+            runBenchmarkShared<double3>(N, BS, iters, evStart, evStop, csv_file);
+            runBenchmarkShared<double4>(N, BS, iters, evStart, evStop, csv_file);
         }
         puts("");
     }
