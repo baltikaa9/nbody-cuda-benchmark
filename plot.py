@@ -66,10 +66,10 @@ fig1.suptitle("Задержка (ms/pair) — все BS", fontsize=14, fontweigh
 plt.savefig("plot_latency.png", dpi=150)
 print("plot_latency.png")
 
-# ─── Фигура 2: gints ───
+# ─── Фигура 2: flops ───
 fig2, axes2 = plt.subplots(2, 2, figsize=(14, 10), layout="constrained")
 for i, vt in enumerate(v_types):
-    plot_type(axes2[i // 2][i % 2], vt, "gints", "GInt/s")
+    plot_type(axes2[i // 2][i % 2], vt, "tflops", "TFLOP/s")
 handles, labels = axes2[0][0].get_legend_handles_labels()
 fig2.legend(
     handles,
@@ -79,12 +79,12 @@ fig2.legend(
     fontsize=8,
     title="BS (variant)",
 )
-fig2.suptitle("Производительность (GInt/s) — все BS", fontsize=14, fontweight="bold")
+fig2.suptitle("Производительность (TFLOP/s) — все BS", fontsize=14, fontweight="bold")
 plt.savefig("plot_throughput.png", dpi=150)
 print("plot_throughput.png")
 
 # ─── Фигура 3: Сравнение типов (лучший BS) ───
-best = df.loc[df.groupby(["type", "N", "variant"])["gints"].idxmax()].sort_values("N")
+best = df.loc[df.groupby(["type", "N", "variant"])"tflops"].idxmax()].sort_values("N")
 
 fig3, axes3 = plt.subplots(1, 2, figsize=(14, 5), layout="constrained")
 for vt in v_types:
@@ -100,7 +100,7 @@ for vt in v_types:
         )
         axes3[1].plot(
             sub["N"],
-            sub["gints"],
+            sub["tflops"],
             linestyle=style,
             marker=marker,
             label=f"{vt} ({variant})",
@@ -109,7 +109,7 @@ for vt in v_types:
 
 for ax, title, ylabel in [
     (axes3[0], "Задержка (лучший BS)", "мс/пара"),
-    (axes3[1], "Производительность (лучший BS)", "GInt/s"),
+    (axes3[1], "Производительность (лучший BS)", "TFLOP/s"),
 ]:
     ax.set_title(title, fontweight="bold")
     ax.set_xscale("log", base=2)
@@ -119,6 +119,8 @@ for ax, title, ylabel in [
     ax.set_xlabel("N")
     ax.set_ylabel(ylabel)
 
-fig3.suptitle("CUDA N-Body: Global vs Shared Memory", fontsize=14, fontweight="bold")
+fig3.suptitle(
+    "CUDA N-Body: Global vs Shared Memory (TFLOP/s)", fontsize=14, fontweight="bold"
+)
 plt.savefig("plot_comparison.png", dpi=150)
 print("plot_comparison.png")

@@ -1,7 +1,6 @@
 #include <cuda_runtime.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <algorithm>
 
 // ════════════════════════════════════════════════════════════════════
 // Traits: scalar type, EPS, DT, display name — по одному на тип
@@ -255,15 +254,15 @@ void runBenchmark(int N, int BS, int iters,
             CUDA_CHECK(cudaEventElapsedTime(&ms, evStart, evStop));
             float avg_ms  = ms / iters;
             long long pairs = (long long)N * N;
-            double gints = (double)pairs / (avg_ms * 1e-3) / 1e9;
+            double flops = (double)pairs * 18 / (avg_ms * 1e-3) / 1e12;
 
             printf("%-8s %7d %5d %12.3f %14.3e %10.3f\n",
                    Traits<VEC>::name(), N, BS, avg_ms,
-                   avg_ms / (double)pairs, gints);
+                   avg_ms / (double)pairs, flops);
 
             if (csv_file) {
                 fprintf(csv_file, "global,%s,%d,%d,%.3f,%.3e,%.3f\n",
-                        Traits<VEC>::name(), N, BS, avg_ms, avg_ms / (double)pairs, gints);
+                        Traits<VEC>::name(), N, BS, avg_ms, avg_ms / (double)pairs, flops);
                 fflush(csv_file);
             }
         }
@@ -327,15 +326,15 @@ void runBenchmarkShared(int N, int BS, int iters,
             CUDA_CHECK(cudaEventElapsedTime(&ms, evStart, evStop));
             float avg_ms  = ms / iters;
             long long pairs = (long long)N * N;
-            double gints = (double)pairs / (avg_ms * 1e-3) / 1e9;
+            double flops = (double)pairs * 18 / (avg_ms * 1e-3) / 1e12;
 
             printf("%-8s %7d %5d %12.3f %14.3e %10.3f\n",
                    Traits<VEC>::name(), N, BS, avg_ms,
-                   avg_ms / (double)pairs, gints);
+                   avg_ms / (double)pairs, flops);
 
             if (csv_file) {
                 fprintf(csv_file, "shared,%s,%d,%d,%.3f,%.3e,%.3f\n",
-                        Traits<VEC>::name(), N, BS, avg_ms, avg_ms / (double)pairs, gints);
+                        Traits<VEC>::name(), N, BS, avg_ms, avg_ms / (double)pairs, flops);
                 fflush(csv_file);
             }
         }
@@ -359,7 +358,7 @@ int main() {
     // Открываем CSV-файл (теперь с колонкой variant)
     FILE* csv_file = fopen("benchmark_results.csv", "w");
     if (csv_file) {
-        fprintf(csv_file, "variant,type,N,BS,avg_ms,ms_per_pair,gints\n");
+        fprintf(csv_file, "variant,type,N,BS,avg_ms,ms_per_pair,tflops\n");
     } else {
         fprintf(stderr, "Warning: Could not open benchmark_results.csv for writing\n");
     }
@@ -369,7 +368,7 @@ int main() {
     // ════════════════════════════════════════════════════════════════
     printf("═══ Global memory ═══\n");
     printf("%-8s %7s %5s %12s %14s %10s\n",
-           "TYPE", "N", "BS", "avg_ms", "ms/pair", "GInt/s");
+           "TYPE", "N", "BS", "avg_ms", "ms/pair", "TFLOP/s");
     printf("─────────────────────────────────────────────────────────────────\n");
 
     const int N_list[]  = {4096, 8192, 16384, 32768, 65536};
@@ -397,7 +396,7 @@ int main() {
     // ════════════════════════════════════════════════════════════════
     printf("\n═══ Shared memory ═══\n");
     printf("%-8s %7s %5s %12s %14s %10s\n",
-           "TYPE", "N", "BS", "avg_ms", "ms/pair", "GInt/s");
+           "TYPE", "N", "BS", "avg_ms", "ms/pair", "TFLOP/s");
     printf("─────────────────────────────────────────────────────────────────\n");
 
     for (int ni = 0; ni < 5; ni++) {
