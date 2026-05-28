@@ -84,7 +84,7 @@ plt.savefig("plot_throughput.png", dpi=150)
 print("plot_throughput.png")
 
 # ─── Фигура 3: Сравнение типов (лучший BS) ───
-best = df.loc[df.groupby(["type", "N", "variant"])"tflops"].idxmax()].sort_values("N")
+best = df.loc[df.groupby(["type", "N", "variant"])["tflops"].idxmax()].sort_values("N")
 
 fig3, axes3 = plt.subplots(1, 2, figsize=(14, 5), layout="constrained")
 for vt in v_types:

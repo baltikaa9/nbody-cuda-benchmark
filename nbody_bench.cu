@@ -254,15 +254,15 @@ void runBenchmark(int N, int BS, int iters,
             CUDA_CHECK(cudaEventElapsedTime(&ms, evStart, evStop));
             float avg_ms  = ms / iters;
             long long pairs = (long long)N * N;
-            double flops = (double)pairs * 18 / (avg_ms * 1e-3) / 1e12;
+            double tflops = (double)pairs * 18 / (avg_ms * 1e-3) / 1e12;
 
             printf("%-8s %7d %5d %12.3f %14.3e %10.3f\n",
                    Traits<VEC>::name(), N, BS, avg_ms,
-                   avg_ms / (double)pairs, flops);
+                   avg_ms / (double)pairs, tflops);
 
             if (csv_file) {
                 fprintf(csv_file, "global,%s,%d,%d,%.3f,%.3e,%.3f\n",
-                        Traits<VEC>::name(), N, BS, avg_ms, avg_ms / (double)pairs, flops);
+                        Traits<VEC>::name(), N, BS, avg_ms, avg_ms / (double)pairs, tflops);
                 fflush(csv_file);
             }
         }
@@ -326,15 +326,15 @@ void runBenchmarkShared(int N, int BS, int iters,
             CUDA_CHECK(cudaEventElapsedTime(&ms, evStart, evStop));
             float avg_ms  = ms / iters;
             long long pairs = (long long)N * N;
-            double flops = (double)pairs * 18 / (avg_ms * 1e-3) / 1e12;
+            double tflops = (double)pairs * 18 / (avg_ms * 1e-3) / 1e12;
 
             printf("%-8s %7d %5d %12.3f %14.3e %10.3f\n",
                    Traits<VEC>::name(), N, BS, avg_ms,
-                   avg_ms / (double)pairs, flops);
+                   avg_ms / (double)pairs, tflops);
 
             if (csv_file) {
                 fprintf(csv_file, "shared,%s,%d,%d,%.3f,%.3e,%.3f\n",
-                        Traits<VEC>::name(), N, BS, avg_ms, avg_ms / (double)pairs, flops);
+                        Traits<VEC>::name(), N, BS, avg_ms, avg_ms / (double)pairs, tflops);
                 fflush(csv_file);
             }
         }
