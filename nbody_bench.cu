@@ -498,9 +498,7 @@ void runBenchmarkMulti(int N, int BS, int iters, int workers,
     const double avg_ms = (omp_get_wtime() - start) * 1000.0 / iters;
     const long long pairs = (long long)N * N;
     const double tflops = (double)pairs * 18 / (avg_ms * 1e-3) / 1e12;
-    const char* variant = useDirect
-        ? (useShared ? "multi_direct_shared" : "multi_direct_global")
-        : (useShared ? "multi_host_shared" : "multi_host_global");
+    const char* variant = useDirect ? "multi_direct" : "multi_host";
 
     printf("%-18s %7d %5d %12.3f %14.3e %10.3f (%d GPU)\n",
            variant, N, BS, avg_ms, avg_ms / (double)pairs, tflops, workers);
@@ -565,7 +563,7 @@ int main() {
 
     // Последовательно проверяем 1, 2, ... GPU.
     for (int workers = 1; workers <= max_workers; workers++) {
-        printf("\n═══ Multi-GPU (host copy, OpenMP) — %d GPU(s) ═══\n", workers);
+        printf("\n═══ Multi-GPU (float3, shared, OpenMP) — %d GPU(s) ═══\n", workers);
         printf("%-18s %7s %5s %12s %14s %10s\n",
                "VARIANT", "N", "BS", "avg_ms", "ms/pair", "TFLOP/s");
         printf("────────────────────────────────────────────────────────────────────────\n");
@@ -574,15 +572,10 @@ int main() {
             int N = N_list[ni];
             for (int bi = 0; bi < 1; bi++) {
                 int BS = BS_list[bi];
-                runBenchmarkMulti<float3>(N, BS, iters, workers, false, false, csv_file);
-                runBenchmarkMulti<float4>(N, BS, iters, workers, false, false, csv_file);
-                runBenchmarkMulti<float3>(N, BS, iters, workers, true,  false, csv_file);
-                runBenchmarkMulti<float4>(N, BS, iters, workers, true,  false, csv_file);
+                // Фиксированная конфигурация: float3 + shared.
+                runBenchmarkMulti<float3>(N, BS, iters, workers, true, false, csv_file);
                 if (workers == 1 || directAvailable) {
-                    runBenchmarkMulti<float3>(N, BS, iters, workers, false, true, csv_file);
-                    runBenchmarkMulti<float4>(N, BS, iters, workers, false, true, csv_file);
-                    runBenchmarkMulti<float3>(N, BS, iters, workers, true,  true, csv_file);
-                    runBenchmarkMulti<float4>(N, BS, iters, workers, true,  true, csv_file);
+                    runBenchmarkMulti<float3>(N, BS, iters, workers, true, true, csv_file);
                 }
             }
             puts("");
