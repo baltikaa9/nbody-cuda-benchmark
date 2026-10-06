@@ -15,23 +15,18 @@ template<> struct Traits<VEC> {                            \
     static const char* name() { return NAME; }              \
 };
 
-MAKE_TRAITS(float3,  float,  1e-4f, 0.01f, "float3" )
-MAKE_TRAITS(float4,  float,  1e-4f, 0.01f, "float4" )
-MAKE_TRAITS(double3, double, 1e-4,  0.01,  "double3")
-MAKE_TRAITS(double4, double, 1e-4,  0.01,  "double4")
+MAKE_TRAITS(float3,  float, 1e-4f, 0.01f, "float3")
+MAKE_TRAITS(float4,  float, 1e-4f, 0.01f, "float4")
 
 // ════════════════════════════════════════════════════════════════════
 // Device helpers
 // ════════════════════════════════════════════════════════════════════
 
-__device__ __forceinline__ float  my_rsqrt(float  x) { return rsqrtf(x); }
-__device__ __forceinline__ double my_rsqrt(double x) { return rsqrt(x);  }
+__device__ __forceinline__ float my_rsqrt(float x) { return rsqrtf(x); }
 
 template<typename VEC> __device__ __forceinline__ VEC vec_zero();
-template<> __device__ __forceinline__ float3  vec_zero<float3>()  { return make_float3 (0.f, 0.f, 0.f);      }
-template<> __device__ __forceinline__ float4  vec_zero<float4>()  { return make_float4 (0.f, 0.f, 0.f, 0.f); }
-template<> __device__ __forceinline__ double3 vec_zero<double3>() { return make_double3(0.0, 0.0, 0.0);       }
-template<> __device__ __forceinline__ double4 vec_zero<double4>() { return make_double4(0.0, 0.0, 0.0, 0.0); }
+template<> __device__ __forceinline__ float3 vec_zero<float3>() { return make_float3(0.f, 0.f, 0.f); }
+template<> __device__ __forceinline__ float4 vec_zero<float4>() { return make_float4(0.f, 0.f, 0.f, 0.f); }
 
 // ════════════════════════════════════════════════════════════════════
 // N-body kernel — наивный (глобальная память)
@@ -385,8 +380,6 @@ int main() {
             int BS = BS_list[bi];
             runBenchmark<float3> (N, BS, iters, evStart, evStop, csv_file);
             runBenchmark<float4> (N, BS, iters, evStart, evStop, csv_file);
-            runBenchmark<double3>(N, BS, iters, evStart, evStop, csv_file);
-            runBenchmark<double4>(N, BS, iters, evStart, evStop, csv_file);
         }
         puts("");
     }
@@ -405,8 +398,6 @@ int main() {
             int BS = BS_list[bi];
             runBenchmarkShared<float3> (N, BS, iters, evStart, evStop, csv_file);
             runBenchmarkShared<float4> (N, BS, iters, evStart, evStop, csv_file);
-            runBenchmarkShared<double3>(N, BS, iters, evStart, evStop, csv_file);
-            runBenchmarkShared<double4>(N, BS, iters, evStart, evStop, csv_file);
         }
         puts("");
     }
