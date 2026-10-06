@@ -430,8 +430,8 @@ void runBenchmarkMulti(int N, int BS, int iters, int workers,
     printf("%-18s %7d %5d %12.3f %14.3e %10.3f (%d GPU)\n",
            variant, N, BS, avg_ms, avg_ms / (double)pairs, tflops, workers);
     if (csv_file) {
-        fprintf(csv_file, "%s,%s,%d,%d,%.3f,%.3e,%.3f\n",
-                variant, Traits<VEC>::name(), N, BS, avg_ms,
+        fprintf(csv_file, "%s,%d,%s,%d,%d,%.3f,%.3e,%.3f\n",
+                variant, workers, Traits<VEC>::name(), N, BS, avg_ms,
                 avg_ms / (double)pairs, tflops);
         fflush(csv_file);
     }
@@ -466,86 +466,46 @@ int main() {
            prop.name, prop.major, prop.minor,
            prop.totalGlobalMem >> 20);
 
-    // Открываем CSV-файл (теперь с колонкой variant)
+    // Открываем CSV-файл с отдельной записью для каждого количества GPU.
     FILE* csv_file = fopen("benchmark_results.csv", "w");
     if (csv_file) {
-        fprintf(csv_file, "variant,type,N,BS,avg_ms,ms_per_pair,tflops\n");
+        fprintf(csv_file, "variant,gpus,type,N,BS,avg_ms,ms_per_pair,tflops\n");
     } else {
         fprintf(stderr, "Warning: Could not open benchmark_results.csv for writing\n");
     }
-
-    // ════════════════════════════════════════════════════════════════
-    // Таблица 1: Глобальная память
-    // ════════════════════════════════════════════════════════════════
-    printf("═══ Global memory ═══\n");
-    printf("%-8s %7s %5s %12s %14s %10s\n",
-           "TYPE", "N", "BS", "avg_ms", "ms/pair", "TFLOP/s");
-    printf("─────────────────────────────────────────────────────────────────\n");
 
     const int N_list[]  = {4096, 8192, 16384, 32768, 65536};
     const int BS_list[] = {256};
     const int iters     = 5;
 
-    cudaEvent_t evStart, evStop;
-    CUDA_CHECK(cudaEventCreate(&evStart));
-    CUDA_CHECK(cudaEventCreate(&evStop));
-
-    for (int ni = 0; ni < 5; ni++) {
-        int N = N_list[ni];
-        for (int bi = 0; bi < 1; bi++) {
-            int BS = BS_list[bi];
-            runBenchmark<float3> (N, BS, iters, evStart, evStop, csv_file);
-            runBenchmark<float4> (N, BS, iters, evStart, evStop, csv_file);
-        }
-        puts("");
+    int max_workers = deviceCount;
+    if (max_workers > omp_get_max_threads()) {
+        max_workers = omp_get_max_threads();
     }
 
-    // ════════════════════════════════════════════════════════════════
-    // Таблица 2: Разделяемая память
-    // ════════════════════════════════════════════════════════════════
-    printf("\n═══ Shared memory ═══\n");
-    printf("%-8s %7s %5s %12s %14s %10s\n",
-           "TYPE", "N", "BS", "avg_ms", "ms/pair", "TFLOP/s");
-    printf("─────────────────────────────────────────────────────────────────\n");
+    // Единственный режим benchmark: последовательно проверяем 1, 2, ... GPU.
+    for (int workers = 1; workers <= max_workers; workers++) {
+        printf("\n═══ Multi-GPU (host copy, OpenMP) — %d GPU(s) ═══\n", workers);
+        printf("%-18s %7s %5s %12s %14s %10s\n",
+               "VARIANT", "N", "BS", "avg_ms", "ms/pair", "TFLOP/s");
+        printf("────────────────────────────────────────────────────────────────────────\n");
 
-    for (int ni = 0; ni < 5; ni++) {
-        int N = N_list[ni];
-        for (int bi = 0; bi < 1; bi++) {
-            int BS = BS_list[bi];
-            runBenchmarkShared<float3> (N, BS, iters, evStart, evStop, csv_file);
-            runBenchmarkShared<float4> (N, BS, iters, evStart, evStop, csv_file);
+        for (int ni = 0; ni < 5; ni++) {
+            int N = N_list[ni];
+            for (int bi = 0; bi < 1; bi++) {
+                int BS = BS_list[bi];
+                runBenchmarkMulti<float3>(N, BS, iters, workers, false, csv_file);
+                runBenchmarkMulti<float4>(N, BS, iters, workers, false, csv_file);
+                runBenchmarkMulti<float3>(N, BS, iters, workers, true,  csv_file);
+                runBenchmarkMulti<float4>(N, BS, iters, workers, true,  csv_file);
+            }
+            puts("");
         }
-        puts("");
-    }
-
-    // ════════════════════════════════════════════════════════════════
-    // Таблица 3: несколько GPU, host copy + OpenMP
-    // ════════════════════════════════════════════════════════════════
-    int workers = deviceCount;
-    if (workers > omp_get_max_threads()) {
-        workers = omp_get_max_threads();
-    }
-    printf("\n═══ Multi-GPU (host copy, OpenMP) — %d GPU(s) ═══\n", workers);
-    printf("%-18s %7s %5s %12s %14s %10s\n",
-           "VARIANT", "N", "BS", "avg_ms", "ms/pair", "TFLOP/s");
-    printf("────────────────────────────────────────────────────────────────────────\n");
-    for (int ni = 0; ni < 5; ni++) {
-        int N = N_list[ni];
-        for (int bi = 0; bi < 1; bi++) {
-            int BS = BS_list[bi];
-            runBenchmarkMulti<float3>(N, BS, iters, workers, false, csv_file);
-            runBenchmarkMulti<float4>(N, BS, iters, workers, false, csv_file);
-            runBenchmarkMulti<float3>(N, BS, iters, workers, true,  csv_file);
-            runBenchmarkMulti<float4>(N, BS, iters, workers, true,  csv_file);
-        }
-        puts("");
     }
 
     if (csv_file) {
         fclose(csv_file);
     }
 
-    CUDA_CHECK(cudaEventDestroy(evStart));
-    CUDA_CHECK(cudaEventDestroy(evStop));
     return 0;
 }
