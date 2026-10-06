@@ -184,17 +184,8 @@ void launchSharedKernel(int grid, int BS,
                         const VEC* d_pos_in, const VEC* d_vel_in,
                         int N, typename Traits<VEC>::S dt)
 {
-    switch (BS) {
-        case 32:   integrateBodiesShared<VEC, 32><<<grid, BS>>>(d_pos_out, d_vel_out, d_pos_in, d_vel_in, N, dt); break;
-        case 64:   integrateBodiesShared<VEC, 64><<<grid, BS>>>(d_pos_out, d_vel_out, d_pos_in, d_vel_in, N, dt); break;
-        case 128:  integrateBodiesShared<VEC, 128><<<grid, BS>>>(d_pos_out, d_vel_out, d_pos_in, d_vel_in, N, dt); break;
-        case 256:  integrateBodiesShared<VEC, 256><<<grid, BS>>>(d_pos_out, d_vel_out, d_pos_in, d_vel_in, N, dt); break;
-        case 512:  integrateBodiesShared<VEC, 512><<<grid, BS>>>(d_pos_out, d_vel_out, d_pos_in, d_vel_in, N, dt); break;
-        case 1024: integrateBodiesShared<VEC, 1024><<<grid, BS>>>(d_pos_out, d_vel_out, d_pos_in, d_vel_in, N, dt); break;
-        default:
-            fprintf(stderr, "Unsupported block size: %d\n", BS);
-            exit(EXIT_FAILURE);
-    }
+    integrateBodiesShared<VEC, 256><<<grid, BS>>>(
+        d_pos_out, d_vel_out, d_pos_in, d_vel_in, N, dt);
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -367,7 +358,7 @@ int main() {
     printf("─────────────────────────────────────────────────────────────────\n");
 
     const int N_list[]  = {4096, 8192, 16384, 32768, 65536};
-    const int BS_list[] = {32, 64, 128, 256, 512, 1024};
+    const int BS_list[] = {256};
     const int iters     = 5;
 
     cudaEvent_t evStart, evStop;
@@ -376,7 +367,7 @@ int main() {
 
     for (int ni = 0; ni < 5; ni++) {
         int N = N_list[ni];
-        for (int bi = 0; bi < 6; bi++) {
+        for (int bi = 0; bi < 1; bi++) {
             int BS = BS_list[bi];
             runBenchmark<float3> (N, BS, iters, evStart, evStop, csv_file);
             runBenchmark<float4> (N, BS, iters, evStart, evStop, csv_file);
@@ -394,7 +385,7 @@ int main() {
 
     for (int ni = 0; ni < 5; ni++) {
         int N = N_list[ni];
-        for (int bi = 0; bi < 6; bi++) {
+        for (int bi = 0; bi < 1; bi++) {
             int BS = BS_list[bi];
             runBenchmarkShared<float3> (N, BS, iters, evStart, evStop, csv_file);
             runBenchmarkShared<float4> (N, BS, iters, evStart, evStop, csv_file);
