@@ -338,17 +338,48 @@ void runBenchmarkShared(int N, int BS, int iters,
     free(h_pos); free(h_vel);
 }
 
+static bool p2pAvailable(int workers) {
+    for (int source = 0; source < workers; source++) {
+        for (int target = 0; target < workers; target++) {
+            if (source == target) continue;
+            int canAccess = 0;
+            CUDA_CHECK(cudaDeviceCanAccessPeer(&canAccess, source, target));
+            if (!canAccess) {
+                fprintf(stderr, "GPU Direct недоступен: GPU %d -> GPU %d\n",
+                        source, target);
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+static void enableP2P(int workers) {
+    for (int source = 0; source < workers; source++) {
+        CUDA_CHECK(cudaSetDevice(source));
+        for (int target = 0; target < workers; target++) {
+            if (source == target) continue;
+            cudaError_t error = cudaDeviceEnablePeerAccess(target, 0);
+            if (error != cudaSuccess && error != cudaErrorPeerAccessAlreadyEnabled) {
+                fprintf(stderr, "cudaDeviceEnablePeerAccess(%d -> %d): %s\n",
+                        source, target, cudaGetErrorString(error));
+                exit(EXIT_FAILURE);
+            }
+        }
+    }
+}
+
 // ════════════════════════════════════════════════════════════════════
-// Несколько GPU: host copy + OpenMP.
-// Каждый GPU получает полный входной массив, но считает свой диапазон
-// выходных тел. Между итерациями результаты собираются на host.
+// Несколько GPU: host copy или GPU Direct + OpenMP.
+// Каждый GPU считает свой диапазон выходных тел.
 // ════════════════════════════════════════════════════════════════════
 template<typename VEC>
 void runBenchmarkMulti(int N, int BS, int iters, int workers,
-                       bool useShared, FILE* csv_file)
+                       bool useShared, bool useDirect, FILE* csv_file)
 {
     using S = typename Traits<VEC>::S;
     if (workers < 1) workers = 1;
+    if (useDirect) enableP2P(workers);
 
     VEC* h_pos[2] = {(VEC*)calloc(N, sizeof(VEC)), (VEC*)calloc(N, sizeof(VEC))};
     VEC* h_vel[2] = {(VEC*)calloc(N, sizeof(VEC)), (VEC*)calloc(N, sizeof(VEC))};
@@ -373,6 +404,18 @@ void runBenchmarkMulti(int N, int BS, int iters, int workers,
         }
     }
 
+    // Для GPU Direct начальное состояние передаётся на каждое устройство
+    // один раз. В следующих итерациях используются только P2P-копирования.
+    if (useDirect) {
+        for (int device = 0; device < workers; device++) {
+            CUDA_CHECK(cudaSetDevice(device));
+            CUDA_CHECK(cudaMemcpy(d_pos[device * 2], h_pos[0],
+                                  N * sizeof(VEC), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpy(d_vel[device * 2], h_vel[0],
+                                  N * sizeof(VEC), cudaMemcpyHostToDevice));
+        }
+    }
+
     const double start = omp_get_wtime();
     int cur = 0;
 
@@ -389,11 +432,13 @@ void runBenchmarkMulti(int N, int BS, int iters, int workers,
             const int count = last - first;
             const int grid = (count + BS - 1) / BS;
 
-            // Все устройства получают одинаковое состояние системы.
-            CUDA_CHECK(cudaMemcpy(myPos[cur], h_pos[cur], N * sizeof(VEC),
-                                  cudaMemcpyHostToDevice));
-            CUDA_CHECK(cudaMemcpy(myVel[cur], h_vel[cur], N * sizeof(VEC),
-                                  cudaMemcpyHostToDevice));
+            // В host copy каждый GPU получает полное состояние с CPU.
+            if (!useDirect) {
+                CUDA_CHECK(cudaMemcpy(myPos[cur], h_pos[cur], N * sizeof(VEC),
+                                      cudaMemcpyHostToDevice));
+                CUDA_CHECK(cudaMemcpy(myVel[cur], h_vel[cur], N * sizeof(VEC),
+                                      cudaMemcpyHostToDevice));
+            }
 
             if (useShared) {
                 integrateBodiesShared<VEC, 256><<<grid, BS>>>(
@@ -407,13 +452,41 @@ void runBenchmarkMulti(int N, int BS, int iters, int workers,
             CUDA_CHECK(cudaGetLastError());
             CUDA_CHECK(cudaDeviceSynchronize());
 
-            // Каждый GPU возвращает только свою часть результата.
-            CUDA_CHECK(cudaMemcpy(h_pos[cur ^ 1] + first,
-                                  myPos[cur ^ 1] + first,
-                                  count * sizeof(VEC), cudaMemcpyDeviceToHost));
-            CUDA_CHECK(cudaMemcpy(h_vel[cur ^ 1] + first,
-                                  myVel[cur ^ 1] + first,
-                                  count * sizeof(VEC), cudaMemcpyDeviceToHost));
+            if (useDirect) {
+                // GPU Direct: источник копирует свою часть результата
+                // непосредственно в input-буфер каждого GPU.
+                #pragma omp barrier
+                for (int target = 0; target < workers; target++) {
+                    VEC* targetPos = d_pos[target * 2 + cur];
+                    VEC* targetVel = d_vel[target * 2 + cur];
+                    if (target == device) {
+                        CUDA_CHECK(cudaMemcpy(targetPos + first,
+                                              myPos[cur ^ 1] + first,
+                                              count * sizeof(VEC),
+                                              cudaMemcpyDeviceToDevice));
+                        CUDA_CHECK(cudaMemcpy(targetVel + first,
+                                              myVel[cur ^ 1] + first,
+                                              count * sizeof(VEC),
+                                              cudaMemcpyDeviceToDevice));
+                    } else {
+                        CUDA_CHECK(cudaMemcpyPeer(targetPos + first, target,
+                                                  myPos[cur ^ 1] + first, device,
+                                                  count * sizeof(VEC)));
+                        CUDA_CHECK(cudaMemcpyPeer(targetVel + first, target,
+                                                  myVel[cur ^ 1] + first, device,
+                                                  count * sizeof(VEC)));
+                    }
+                }
+                CUDA_CHECK(cudaDeviceSynchronize());
+            } else {
+                // Host copy: каждый GPU возвращает только свою часть.
+                CUDA_CHECK(cudaMemcpy(h_pos[cur ^ 1] + first,
+                                      myPos[cur ^ 1] + first,
+                                      count * sizeof(VEC), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(h_vel[cur ^ 1] + first,
+                                      myVel[cur ^ 1] + first,
+                                      count * sizeof(VEC), cudaMemcpyDeviceToHost));
+            }
 
             #pragma omp barrier
             #pragma omp single
@@ -425,7 +498,9 @@ void runBenchmarkMulti(int N, int BS, int iters, int workers,
     const double avg_ms = (omp_get_wtime() - start) * 1000.0 / iters;
     const long long pairs = (long long)N * N;
     const double tflops = (double)pairs * 18 / (avg_ms * 1e-3) / 1e12;
-    const char* variant = useShared ? "multi_host_shared" : "multi_host_global";
+    const char* variant = useDirect
+        ? (useShared ? "multi_direct_shared" : "multi_direct_global")
+        : (useShared ? "multi_host_shared" : "multi_host_global");
 
     printf("%-18s %7d %5d %12.3f %14.3e %10.3f (%d GPU)\n",
            variant, N, BS, avg_ms, avg_ms / (double)pairs, tflops, workers);
@@ -483,7 +558,12 @@ int main() {
         max_workers = omp_get_max_threads();
     }
 
-    // Единственный режим benchmark: последовательно проверяем 1, 2, ... GPU.
+    const bool directAvailable = p2pAvailable(max_workers);
+    if (!directAvailable && max_workers > 1) {
+        printf("GPU Direct пропущен: выбранные GPU не поддерживают P2P.\n");
+    }
+
+    // Последовательно проверяем 1, 2, ... GPU.
     for (int workers = 1; workers <= max_workers; workers++) {
         printf("\n═══ Multi-GPU (host copy, OpenMP) — %d GPU(s) ═══\n", workers);
         printf("%-18s %7s %5s %12s %14s %10s\n",
@@ -494,10 +574,16 @@ int main() {
             int N = N_list[ni];
             for (int bi = 0; bi < 1; bi++) {
                 int BS = BS_list[bi];
-                runBenchmarkMulti<float3>(N, BS, iters, workers, false, csv_file);
-                runBenchmarkMulti<float4>(N, BS, iters, workers, false, csv_file);
-                runBenchmarkMulti<float3>(N, BS, iters, workers, true,  csv_file);
-                runBenchmarkMulti<float4>(N, BS, iters, workers, true,  csv_file);
+                runBenchmarkMulti<float3>(N, BS, iters, workers, false, false, csv_file);
+                runBenchmarkMulti<float4>(N, BS, iters, workers, false, false, csv_file);
+                runBenchmarkMulti<float3>(N, BS, iters, workers, true,  false, csv_file);
+                runBenchmarkMulti<float4>(N, BS, iters, workers, true,  false, csv_file);
+                if (workers == 1 || directAvailable) {
+                    runBenchmarkMulti<float3>(N, BS, iters, workers, false, true, csv_file);
+                    runBenchmarkMulti<float4>(N, BS, iters, workers, false, true, csv_file);
+                    runBenchmarkMulti<float3>(N, BS, iters, workers, true,  true, csv_file);
+                    runBenchmarkMulti<float4>(N, BS, iters, workers, true,  true, csv_file);
+                }
             }
             puts("");
         }
