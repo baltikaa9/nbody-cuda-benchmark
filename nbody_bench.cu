@@ -1,6 +1,7 @@
 #include <cuda_runtime.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <omp.h>
 
 // ════════════════════════════════════════════════════════════════════
 // Traits: scalar type, EPS, DT, display name — по одному на тип
@@ -38,13 +39,16 @@ __global__ void integrateBodies(
     const VEC* __restrict__ oldPos,
     const VEC* __restrict__ oldVel,
     int N,
-    typename Traits<VEC>::S dt
+    typename Traits<VEC>::S dt,
+    int first = 0,
+    int last = -1
 ) {
     using S = typename Traits<VEC>::S;
     const S EPS2 = Traits<VEC>::EPS * Traits<VEC>::EPS;
+    if (last < 0) last = N;
 
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= N) return;
+    int idx = first + blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= last) return;
 
     VEC pos = oldPos[idx];
     VEC f   = vec_zero<VEC>();
@@ -82,20 +86,23 @@ __global__ void integrateBodiesShared(
     const VEC* __restrict__ oldPos,
     const VEC* __restrict__ oldVel,
     int N,
-    typename Traits<VEC>::S dt
+    typename Traits<VEC>::S dt,
+    int first = 0,
+    int last = -1
 ) {
     using S = typename Traits<VEC>::S;
     const S EPS2 = Traits<VEC>::EPS * Traits<VEC>::EPS;
+    if (last < 0) last = N;
 
     __shared__ VEC sharedPos[BLOCK_SIZE];
 
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int idx = first + blockIdx.x * blockDim.x + threadIdx.x;
     int numTiles = (N + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
     VEC pos, vel;
     VEC f = vec_zero<VEC>();
 
-    if (idx < N) {
+    if (idx >= first && idx < last) {
         pos = oldPos[idx];
     }
 
@@ -113,7 +120,7 @@ __global__ void integrateBodiesShared(
         int tileSize = tileEnd - tileStart;
 
         // Вычисляем взаимодействия с телами из текущего тайла
-        if (idx < N) {
+        if (idx >= first && idx < last) {
             for (int i = 0; i < tileSize; i++) {
                 VEC pi = sharedPos[i];
                 S dx = pi.x - pos.x;
@@ -133,7 +140,7 @@ __global__ void integrateBodiesShared(
         __syncthreads();
     }
 
-    if (idx < N) {
+    if (idx >= first && idx < last) {
         vel = oldVel[idx];
         vel.x += f.x * dt;  vel.y += f.y * dt;  vel.z += f.z * dt;
         pos.x += vel.x * dt; pos.y += vel.y * dt; pos.z += vel.z * dt;
@@ -332,9 +339,127 @@ void runBenchmarkShared(int N, int BS, int iters,
 }
 
 // ════════════════════════════════════════════════════════════════════
+// Несколько GPU: host copy + OpenMP.
+// Каждый GPU получает полный входной массив, но считает свой диапазон
+// выходных тел. Между итерациями результаты собираются на host.
+// ════════════════════════════════════════════════════════════════════
+template<typename VEC>
+void runBenchmarkMulti(int N, int BS, int iters, int workers,
+                       bool useShared, FILE* csv_file)
+{
+    using S = typename Traits<VEC>::S;
+    if (workers < 1) workers = 1;
+
+    VEC* h_pos[2] = {(VEC*)calloc(N, sizeof(VEC)), (VEC*)calloc(N, sizeof(VEC))};
+    VEC* h_vel[2] = {(VEC*)calloc(N, sizeof(VEC)), (VEC*)calloc(N, sizeof(VEC))};
+    if (!h_pos[0] || !h_pos[1] || !h_vel[0] || !h_vel[1]) {
+        fputs("OOM\n", stderr);
+        exit(EXIT_FAILURE);
+    }
+    randomInit<VEC>(h_pos[0], N);
+    randomInit<VEC>(h_vel[0], N);
+
+    VEC** d_pos = (VEC**)calloc((size_t)workers * 2, sizeof(VEC*));
+    VEC** d_vel = (VEC**)calloc((size_t)workers * 2, sizeof(VEC*));
+    if (!d_pos || !d_vel) { fputs("OOM\n", stderr); exit(EXIT_FAILURE); }
+
+    // Выделение делается последовательно, чтобы не смешивать ошибки
+    // инициализации CUDA с измеряемой частью.
+    for (int device = 0; device < workers; device++) {
+        CUDA_CHECK(cudaSetDevice(device));
+        for (int buf = 0; buf < 2; buf++) {
+            CUDA_CHECK(cudaMalloc(&d_pos[device * 2 + buf], N * sizeof(VEC)));
+            CUDA_CHECK(cudaMalloc(&d_vel[device * 2 + buf], N * sizeof(VEC)));
+        }
+    }
+
+    const double start = omp_get_wtime();
+    int cur = 0;
+
+    #pragma omp parallel num_threads(workers) shared(cur)
+    {
+        const int device = omp_get_thread_num();
+        CUDA_CHECK(cudaSetDevice(device));
+        VEC* myPos[2] = {d_pos[device * 2], d_pos[device * 2 + 1]};
+        VEC* myVel[2] = {d_vel[device * 2], d_vel[device * 2 + 1]};
+
+        for (int it = 0; it < iters; it++) {
+            const int first = (N * device) / workers;
+            const int last = (N * (device + 1)) / workers;
+            const int count = last - first;
+            const int grid = (count + BS - 1) / BS;
+
+            // Все устройства получают одинаковое состояние системы.
+            CUDA_CHECK(cudaMemcpy(myPos[cur], h_pos[cur], N * sizeof(VEC),
+                                  cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpy(myVel[cur], h_vel[cur], N * sizeof(VEC),
+                                  cudaMemcpyHostToDevice));
+
+            if (useShared) {
+                integrateBodiesShared<VEC, 256><<<grid, BS>>>(
+                    myPos[cur ^ 1], myVel[cur ^ 1], myPos[cur], myVel[cur],
+                    N, Traits<VEC>::DT, first, last);
+            } else {
+                integrateBodies<VEC><<<grid, BS>>>(
+                    myPos[cur ^ 1], myVel[cur ^ 1], myPos[cur], myVel[cur],
+                    N, Traits<VEC>::DT, first, last);
+            }
+            CUDA_CHECK(cudaGetLastError());
+            CUDA_CHECK(cudaDeviceSynchronize());
+
+            // Каждый GPU возвращает только свою часть результата.
+            CUDA_CHECK(cudaMemcpy(h_pos[cur ^ 1] + first,
+                                  myPos[cur ^ 1] + first,
+                                  count * sizeof(VEC), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(h_vel[cur ^ 1] + first,
+                                  myVel[cur ^ 1] + first,
+                                  count * sizeof(VEC), cudaMemcpyDeviceToHost));
+
+            #pragma omp barrier
+            #pragma omp single
+            { cur ^= 1; }
+            #pragma omp barrier
+        }
+    }
+
+    const double avg_ms = (omp_get_wtime() - start) * 1000.0 / iters;
+    const long long pairs = (long long)N * N;
+    const double tflops = (double)pairs * 18 / (avg_ms * 1e-3) / 1e12;
+    const char* variant = useShared ? "multi_host_shared" : "multi_host_global";
+
+    printf("%-18s %7d %5d %12.3f %14.3e %10.3f (%d GPU)\n",
+           variant, N, BS, avg_ms, avg_ms / (double)pairs, tflops, workers);
+    if (csv_file) {
+        fprintf(csv_file, "%s,%s,%d,%d,%.3f,%.3e,%.3f\n",
+                variant, Traits<VEC>::name(), N, BS, avg_ms,
+                avg_ms / (double)pairs, tflops);
+        fflush(csv_file);
+    }
+
+    for (int device = 0; device < workers; device++) {
+        CUDA_CHECK(cudaSetDevice(device));
+        for (int buf = 0; buf < 2; buf++) {
+            CUDA_CHECK(cudaFree(d_pos[device * 2 + buf]));
+            CUDA_CHECK(cudaFree(d_vel[device * 2 + buf]));
+        }
+    }
+    free(d_pos); free(d_vel);
+    free(h_pos[0]); free(h_pos[1]); free(h_vel[0]); free(h_vel[1]);
+}
+
+// ════════════════════════════════════════════════════════════════════
 // main
 // ════════════════════════════════════════════════════════════════════
 int main() {
+    omp_set_dynamic(0);
+
+    int deviceCount = 0;
+    CUDA_CHECK(cudaGetDeviceCount(&deviceCount));
+    if (deviceCount < 1) {
+        fprintf(stderr, "CUDA GPU не найден\n");
+        return EXIT_FAILURE;
+    }
+
     cudaDeviceProp prop;
     CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
     printf("GPU: %s  (SM %d.%d, %zu MB)\n\n",
@@ -389,6 +514,29 @@ int main() {
             int BS = BS_list[bi];
             runBenchmarkShared<float3> (N, BS, iters, evStart, evStop, csv_file);
             runBenchmarkShared<float4> (N, BS, iters, evStart, evStop, csv_file);
+        }
+        puts("");
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // Таблица 3: несколько GPU, host copy + OpenMP
+    // ════════════════════════════════════════════════════════════════
+    int workers = deviceCount;
+    if (workers > omp_get_max_threads()) {
+        workers = omp_get_max_threads();
+    }
+    printf("\n═══ Multi-GPU (host copy, OpenMP) — %d GPU(s) ═══\n", workers);
+    printf("%-18s %7s %5s %12s %14s %10s\n",
+           "VARIANT", "N", "BS", "avg_ms", "ms/pair", "TFLOP/s");
+    printf("────────────────────────────────────────────────────────────────────────\n");
+    for (int ni = 0; ni < 5; ni++) {
+        int N = N_list[ni];
+        for (int bi = 0; bi < 1; bi++) {
+            int BS = BS_list[bi];
+            runBenchmarkMulti<float3>(N, BS, iters, workers, false, csv_file);
+            runBenchmarkMulti<float4>(N, BS, iters, workers, false, csv_file);
+            runBenchmarkMulti<float3>(N, BS, iters, workers, true,  csv_file);
+            runBenchmarkMulti<float4>(N, BS, iters, workers, true,  csv_file);
         }
         puts("");
     }
